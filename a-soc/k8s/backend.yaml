@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: asoc
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: asoc-secrets
+  namespace: asoc
+type: Opaque
+stringData:
+  openai-api-key: "YOUR_OPENAI_KEY_HERE"
+  postgres-password: "YOUR_POSTGRES_PASSWORD"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: asoc-backend
+  namespace: asoc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: asoc-backend
+  template:
+    metadata:
+      labels:
+        app: asoc-backend
+    spec:
+      containers:
+      - name: backend
+        image: YOUR_REGISTRY/asoc-backend:latest
+        ports:
+        - containerPort: 9002
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: asoc-secrets
+              key: openai-api-key
+        - name: DATABASE_URL
+          value: "postgresql://asoc_user:$(POSTGRES_PASSWORD)@postgres:5432/asoc_db"
+        - name: REDIS_URL
+          value: "redis://redis:6379/0"
+        - name: OPA_URL
+          value: "http://opa:8181"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9002
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9002
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: asoc-backend
+  namespace: asoc
+spec:
+  selector:
+    app: asoc-backend
+  ports:
+  - protocol: TCP
+    port: 9002
+    targetPort: 9002
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: asoc-backend-hpa
+  namespace: asoc
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: asoc-backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70

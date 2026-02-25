@@ -1,0 +1,129 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: asoc-postgres
+    environment:
+      POSTGRES_DB: asoc_db
+      POSTGRES_USER: asoc_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme123}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U asoc_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - asoc-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: asoc-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - asoc-network
+
+  # Open Policy Agent
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: asoc-opa
+    ports:
+      - "8181:8181"
+    command:
+      - "run"
+      - "--server"
+      - "--log-level=info"
+      - "/policies"
+    volumes:
+      - ./guardrails/policies:/policies
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8181/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - asoc-network
+
+  # A-SOC Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: asoc-backend
+    environment:
+      # LLM Configuration
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      
+      # Database
+      DATABASE_URL: postgresql://asoc_user:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/asoc_db
+      REDIS_URL: redis://redis:6379/0
+      
+      # OPA
+      OPA_URL: http://opa:8181
+      
+      # AWS (Optional - for real integrations)
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      
+      # Slack (Optional)
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      
+    ports:
+      - "9002:9002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: uvicorn api:app --host 0.0.0.0 --port 9002 --reload
+    networks:
+      - asoc-network
+    restart: unless-stopped
+
+  # Next.js Dashboard
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: asoc-dashboard
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:9002
+      NEXT_PUBLIC_WS_URL: ws://localhost:9002
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - asoc-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  asoc-network:
+    driver: bridge
