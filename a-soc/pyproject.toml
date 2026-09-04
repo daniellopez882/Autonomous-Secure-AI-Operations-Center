@@ -1,22 +1,31 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "a-soc"
-version = "0.1.0"
-description = "Autonomous Secure AI Operations Center"
-readme = "README.md"
+version = "1.0.0"
+description = "Agentic security operations centre - incident simulation with policy guardrails."
 requires-python = ">=3.11"
-dependencies = [
-    "fastapi",
-    "uvicorn",
-    "pydantic",
-    "pydantic-settings",
-    "langgraph",
-    "boto3",
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [".venv", "venv", "dashboard", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "C4", "UP", "S", "T20", "RUF"]
+ignore = [
+    "E501",
+    "B008",
+    # StrEnum is 3.11+; the project still advertises 3.10 support, so
+    # `class X(str, Enum)` stays.
+    "UP042",
 ]
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "B017"]
+"main.py" = ["T201", "F841"]  # CLI demo: prints are its output
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true

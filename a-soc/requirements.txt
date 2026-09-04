@@ -1,27 +1,45 @@
-fastapi
-uvicorn
-pydantic
-pydantic-settings
-langgraph
-langchain-openai
-langchain-anthropic
-boto3
-kubernetes
-sqlalchemy[asyncio]
-asyncpg
-redis
-python-jose[cryptography]
-passlib[bcrypt]
-httpx
-pytest
-pytest-asyncio
-black
-isort
-mypy
-python-dotenv
-tiktoken
-openai
-anthropic
-pinecone-client
-pyyaml
-opa-python-client
+# Runtime dependencies. Dev and test tooling is in requirements-dev.txt.
+#
+# The previous file pinned nothing at all -- 27 bare package names, so two
+# installs a week apart could resolve to different major versions -- and mixed
+# pytest, black, isort and mypy into the production image.
+#
+# Lower bounds are set where the code relies on a specific API; upper bounds
+# guard the next major release.
+
+# ---- API and server ---------------------------------------------------------
+fastapi>=0.111,<1.0
+uvicorn[standard]>=0.29,<1.0
+pydantic>=2.7,<3.0
+pydantic-settings>=2.2,<3.0
+python-multipart>=0.0.9,<0.1
+websockets>=12.0,<16.0
+
+# ---- Configuration ----------------------------------------------------------
+python-dotenv>=1.0,<2.0
+pyyaml>=6.0,<7.0
+
+# ---- HTTP -------------------------------------------------------------------
+httpx>=0.27,<1.0
+
+# NOTE: the packages below are declared because the agent modules import them,
+# but the shipped simulation does not call out to any of these services. They
+# are deliberately NOT imported by api.py, so the service starts without them.
+# See docs/status.md for what is implemented versus stubbed.
+
+# ---- Agent orchestration ----------------------------------------------------
+# core/orchestration/workflow.py builds a real LangGraph StateGraph.
+langgraph>=0.1,<2.0
+
+# ---- Cloud (agents only) ----------------------------------------------------
+boto3>=1.34,<2.0
+kubernetes>=29.0,<35.0
+
+# ---- Data stores (declared, not yet wired) ----------------------------------
+sqlalchemy[asyncio]>=2.0,<3.0
+asyncpg>=0.29,<0.31
+redis>=5.0,<7.0
+
+# ---- Auth -------------------------------------------------------------------
+python-jose[cryptography]>=3.3,<4.0
+passlib[bcrypt]>=1.7,<2.0
