@@ -1,295 +1,376 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+"""
+api.py
+A-SOC backend: HTTP probes plus a WebSocket that streams a SOC incident
+simulation to the dashboard.
+
+What this service actually is, stated plainly because the code did not say so:
+it **replays scripted attack scenarios**. The agent classes under ``agents/``
+return hardcoded findings and are not wired to an LLM. What is real, and what
+this revision makes real, is the **guardrail**: whether a proposed remediation
+may execute is now decided by ``guardrails.decision.evaluate_action`` from the
+action type and its context.
+
+Previously that decision was ``if risk_score > 0.6:  # Threshold for demo`` --
+a magic number that ignored ``RiskScorer`` and the rego policy, both of which
+were dead code.
+
+Other fixes in this revision:
+
+* ``ConnectionManager`` moved to ``core.realtime`` and made fault-tolerant. A
+  single dead client used to abort the whole broadcast loop, which permanently
+  killed the background telemetry task the first time anyone closed a tab.
+* ``@app.on_event("startup")`` replaced with a lifespan handler, and the
+  background task is now cancelled on shutdown instead of leaking.
+* ``datetime.utcnow()`` (deprecated since 3.12) replaced with aware timestamps.
+* CORS origins and the optional WebSocket token come from configuration rather
+  than being hardcoded to localhost.
+* Agent imports are deferred, so the service starts without boto3 installed --
+  it previously required the AWS SDK to serve a simulation that never calls AWS.
+"""
+
+from __future__ import annotations
+
 import asyncio
-import json
+import contextlib
+import random
+import secrets
 import uuid
-import sys
-from pathlib import Path
-from typing import List
-from datetime import datetime
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
 
-# Add the a-soc directory (parent of api.py) to sys.path
-sys.path.append(str(Path(__file__).parent))
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
 
-from agents.telemetry.telemetry_agent import TelemetryAgent
-from agents.detection.detection_agent import DetectionAgent
-from agents.supervisor.supervisor_agent import SupervisorAgent
-from agents.forensics.forensics_agent import ForensicsAgent
-from agents.response.response_agent import ResponseAgent
-from agents.compliance.compliance_agent import ComplianceAgent
-from agents.base.message import ASOCMessage, MessageType, Priority
+from core.config.settings import settings
+from core.logging_config import get_logger, setup_logging
+from core.realtime.connection_manager import ConnectionManager
+from core.simulation.scenarios import BENIGN_TELEMETRY, SCENARIOS
+from guardrails.decision import ActionRequest, Decision, evaluate_action
 
-app = FastAPI(title="A-SOC API")
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            await connection.send_json(message)
+logger = get_logger("asoc.api")
 
 manager = ConnectionManager()
+_background_task: asyncio.Task | None = None
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Kubernetes probes"""
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Start the ambient telemetry feed, and stop it cleanly on shutdown."""
+    global _background_task
+    setup_logging(level=settings.LOG_LEVEL, json_output=settings.JSON_LOGS)
+    logger.info("service_starting", environment=settings.ENVIRONMENT)
+    _background_task = asyncio.create_task(background_telemetry())
+    try:
+        yield
+    finally:
+        logger.info("service_stopping")
+        if _background_task is not None:
+            _background_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _background_task
+        await manager.close_all()
+
+
+app = FastAPI(
+    title="A-SOC API",
+    description="Agentic security operations centre - incident simulation and guardrails.",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url=None if settings.is_production else "/docs",
+    openapi_url=None if settings.is_production else "/openapi.json",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
+
+
+# ----------------------------------------------------------------- HTTP probes
+@app.get("/health", tags=["ops"])
+async def health_check() -> dict[str, Any]:
+    """Liveness. Deliberately touches no dependency."""
     return {
         "status": "healthy",
         "service": "asoc-backend",
-        "active_connections": len(manager.active_connections)
+        "version": app.version,
+        "active_connections": len(manager),
     }
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(background_telemetry())
+
+@app.get("/ready", tags=["ops"])
+async def readiness() -> dict[str, Any]:
+    """
+    Readiness. The simulation has no external dependencies, so this reports
+    configuration health rather than pretending to check a database.
+    """
+    checks = {
+        "telemetry_task": {
+            "ok": _background_task is not None and not _background_task.done(),
+            "required": True,
+        },
+        "guardrails": {"ok": _guardrails_self_test(), "required": True},
+        "ws_auth_configured": {
+            "ok": bool(settings.WS_AUTH_TOKEN) or not settings.is_production,
+            "required": True,
+        },
+    }
+    ready = all(c["ok"] for c in checks.values() if c["required"])
+    return {"ready": ready, "checks": checks}
+
+
+def _guardrails_self_test() -> bool:
+    """Confirm the policy engine answers, so /ready fails if it is broken."""
+    try:
+        verdict = evaluate_action(ActionRequest("LOG_QUERY", "self-test"))
+        return verdict.decision is Decision.ALLOW
+    except Exception:
+        logger.error("guardrail_self_test_failed", exc_info=True)
+        return False
+
+
+@app.get("/api/v1/policy/evaluate", tags=["guardrails"])
+async def evaluate_policy(
+    action_type: str = Query(..., max_length=64),
+    target: str = Query("unspecified", max_length=256),
+    production: bool = Query(False),
+    irreversible: bool = Query(False),
+) -> dict[str, Any]:
+    """
+    Evaluate a proposed action against the guardrail without executing it.
+
+    Exposed so the policy can be inspected and tested directly, rather than
+    only being observable by watching the simulation.
+    """
+    verdict = evaluate_action(
+        ActionRequest(
+            action_type=action_type,
+            target=target,
+            context={"production_environment": production, "irreversible": irreversible},
+        )
+    )
+    return verdict.to_dict()
+
+
+# -------------------------------------------------------------------- WebSocket
+def _ws_token_ok(supplied: str | None) -> bool:
+    """Constant-time check of the optional WebSocket token."""
+    expected = settings.WS_AUTH_TOKEN
+    if not expected:
+        # No token configured: open in development, refused in production
+        # (the readiness probe reports this as unready).
+        return not settings.is_production
+    return bool(supplied) and secrets.compare_digest(supplied, expected)
+
 
 @app.websocket("/ws/threat-feed")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(None)) -> None:
+    if not _ws_token_ok(token):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="unauthorized")
+        logger.warning("ws_rejected_unauthorized")
+        return
+
     await manager.connect(websocket)
-    permission_event = asyncio.Event() # Used to pause execution
-    
+    permission_event = asyncio.Event()
+    current_task: asyncio.Task | None = None
+
     try:
-        current_task = None
-        
         while True:
-            # Keep connection alive and listen for commands from UI
             data = await websocket.receive_text()
-            
+
             if data == "START_SIMULATION":
-                # Create a new simulation task
-                if current_task: current_task.cancel()
-                permission_event.clear() # Reset approval status
+                if current_task is not None:
+                    current_task.cancel()
+                permission_event.clear()
                 current_task = asyncio.create_task(run_simulation(permission_event))
-            
+
             elif data == "APPROVE_ACTION":
-                # User clicked 'Approve'
-                permission_event.set() 
-                await manager.broadcast({
-                    "id": str(uuid.uuid4()),
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "agent": "System",
-                    "status": "approved",
-                    "message": "Human operator authorized action.",
-                    "severity": "low"
-                })
+                permission_event.set()
+                await manager.broadcast(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "timestamp": _now(),
+                        "agent": "System",
+                        "status": "approved",
+                        "message": "Human operator authorized action.",
+                        "severity": "low",
+                    }
+                )
 
     except WebSocketDisconnect:
+        logger.info("ws_client_disconnected")
+    finally:
         manager.disconnect(websocket)
-        if current_task: current_task.cancel()
+        if current_task is not None:
+            current_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await current_task
 
-import random
 
-async def background_telemetry():
-    """Simulate continuous benign log flow."""
-    benign_messages = [
-        "VPC Flow: Traffic allowed from 10.0.0.5 to 10.0.0.8 (Port 443)",
-        "IAM: User 'dev-operator' assumed role 'ReadOnlyAccess'",
-        "CloudTrail: GetBucketEncryption on 'assets-prod'",
-        "CloudWatch: Metric 'CPUUtilization' within threshold for 'web-server-01'",
-        "K8s: Pod 'auth-api-5f8d' healthy heart-beat received",
-        "S3: PutObject to 'audit-logs' by 'system-service'",
-        "GuardDuty: No new threats detected in last 5 minutes",
-        "Config: Resource 'sg-0abc123' compliant with policy 'restricted-ssh'"
-    ]
+# ------------------------------------------------------------- background feed
+async def background_telemetry() -> None:
+    """
+    Ambient benign log flow.
+
+    The loop body is guarded: broadcast no longer raises, but an unexpected
+    error here would otherwise silently end the feed for the whole process,
+    which is exactly the failure the old implementation had.
+    """
     while True:
-        await manager.broadcast({
-            "id": str(uuid.uuid4()),
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "agent": "Telemetry",
-            "status": "scanning",
-            "message": random.choice(benign_messages),
-            "severity": "low",
-            "is_background": True
-        })
-        await asyncio.sleep(random.uniform(2, 5))
+        try:
+            await manager.broadcast(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": _now(),
+                    "agent": "Telemetry",
+                    "status": "scanning",
+                    "message": random.choice(BENIGN_TELEMETRY),  # noqa: S311 - demo content
+                    "severity": "low",
+                    "is_background": True,
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.error("telemetry_broadcast_failed", exc_info=True)
+        await asyncio.sleep(random.uniform(2, 5))  # noqa: S311 - demo pacing
 
-async def run_simulation(permission_event: asyncio.Event):
-    """Run a randomized secure SOC cycle and stream updates to the UI, pausing for approval."""
-    
-    # helper to stream status
-    async def stream_status(agent, status, message, severity="low"):
-        await manager.broadcast({
-            "id": str(uuid.uuid4()),
-            "timestamp":  datetime.utcnow().isoformat() + "Z",
-            "agent": agent,  
-            "status": status,
-            "message": message,
-            "severity": severity
-        })
-        await asyncio.sleep(1.5) # Pacing for demo
 
-    await stream_status("System", "active", "A-SOC Protocol Initiated", "low")
-
-    # DEFINE SCENARIOS
-    scenarios = [
-        {
-            "name": "IAM Privilege Escalation",
-            "telemetry": {"event": "ConsoleLogin", "user": "admin", "ip": "192.168.1.50"},
-            "alert": "Suspicious ConsoleLogin detected (Brute Force)",
-            "risk_score": 0.85,
-            "action": "IAM_REVOKE",
-            "target": "admin-user",
-            "graph": {
-                 "nodes": [
-                    {"id": "attacker-ip", "type": "threat_actor", "label": "IP: 192.168.1.50", "risk": "critical"},
-                    {"id": "user", "type": "identity", "label": "User: admin", "risk": "high"},
-                    {"id": "policy", "type": "resource", "label": "IAM: FullAccess", "risk": "medium"}
-                ],
-                "edges": [
-                    {"source": "attacker-ip", "target": "user", "label": "Brute Force"},
-                    {"source": "user", "target": "policy", "label": "Policy Attach"}
-                ]
-            }
-        },
-        {
-            "name": "Ransomware Data Encrypted",
-            "telemetry": {"event": "FileWrite", "path": "/data/db.enc", "process": "encrypt.exe"},
-            "alert": "High-velocity file encryption detected on DB Server",
-            "risk_score": 0.95,
-            "action": "ISOLATE_INSTANCE",
-            "target": "i-098f6bcd4621d373c",
-            "graph": {
-                 "nodes": [
-                    {"id": "c2-server", "type": "threat_actor", "label": "C2: 45.33.2.1", "risk": "critical"},
-                    {"id": "host", "type": "resource", "label": "EC2: DB-Prod", "risk": "critical"},
-                    {"id": "file", "type": "resource", "label": "File: sensitive.db", "risk": "high"}
-                ],
-                "edges": [
-                    {"source": "c2-server", "target": "host", "label": "Command & Control"},
-                    {"source": "host", "target": "file", "label": "Encryption Process"}
-                ]
-            }
-        },
-        {
-            "name": "S3 Data Exfiltration",
-            "telemetry": {"event": "GetObject", "bucket": "customer-data", "bytes": 5000000000},
-            "alert": "Anomalous Data Transfer (5GB) to external IP",
-            "risk_score": 0.75,
-            "action": "BLOCK_IP",
-            "target": "203.0.113.42",
-            "graph": {
-                 "nodes": [
-                    {"id": "insider", "type": "identity", "label": "User: analyst-bob", "risk": "medium"},
-                    {"id": "bucket", "type": "resource", "label": "S3: customer-data", "risk": "high"},
-                    {"id": "dest-ip", "type": "threat_actor", "label": "IP: 203.0.113.42", "risk": "critical"}
-                ],
-                "edges": [
-                    {"source": "insider", "target": "bucket", "label": "Bulk Read"},
-                    {"source": "bucket", "target": "dest-ip", "label": "Exfiltration"}
-                ]
-            }
-        }
-    ]
-    
-    scenario = random.choice(scenarios)
+# ------------------------------------------------------------------ simulation
+async def run_simulation(permission_event: asyncio.Event) -> None:
+    """Replay one attack scenario, gating remediation on the guardrail."""
     incident_id = str(uuid.uuid4())
-    
-    await stream_status("System", "monitoring", f"Scenario Active: {scenario['name']}", "low")
 
-    # 2. Ingest
-    await stream_status("Telemetry", "scanning", f"Ingesting Logs: {scenario['telemetry']}", "low")
-    
-    alert_msg = ASOCMessage(
-        message_type=MessageType.ALERT,
-        source_agent="TelemetryAgent",
-        payload=scenario['telemetry'],
-        correlation_id=incident_id,
-        priority=Priority.MEDIUM
+    async def stream(agent: str, status_: str, message: str, severity: str = "low") -> None:
+        await manager.broadcast(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": _now(),
+                "agent": agent,
+                "status": status_,
+                "message": message,
+                "severity": severity,
+                "incident_id": incident_id,
+            }
+        )
+        await asyncio.sleep(settings.SIMULATION_STEP_SECONDS)
+
+    scenario = random.choice(SCENARIOS)  # noqa: S311 - demo content
+    logger.info("simulation_started", incident_id=incident_id, scenario=scenario.name)
+
+    await stream("System", "active", "A-SOC Protocol Initiated")
+    await stream("System", "monitoring", f"Scenario Active: {scenario.name}")
+
+    # 1. Ingest
+    await stream("Telemetry", "scanning", f"Ingesting Logs: {scenario.telemetry}")
+    await stream("Telemetry", "alert", scenario.alert, "medium")
+
+    # 2. Detect
+    await stream("Detection", "analyzing", "Correlating events with Threat Intel...")
+    await stream(
+        "Detection",
+        "detected",
+        f"Threat Confirmed: detection confidence {scenario.detection_confidence:.2f}",
+        "high",
     )
-    await stream_status("Telemetry", "alert", scenario['alert'], "medium")
 
-    # 3. Detect
-    await stream_status("Detection", "analyzing", "Correlating events with Threat Intel...", "low")
-    # Simulate detection processing
-    detection_report = ASOCMessage(
-        message_type=MessageType.REPORT,
-        source_agent="DetectionAgent",
-        payload={"risk_score": scenario['risk_score'], "analysis": "Confirmed Malicious"},
-        correlation_id=incident_id
+    # 3. Supervise -- the real guardrail, not a magic threshold.
+    await stream("Supervisor", "evaluating", "Evaluating proposed action against policy...")
+
+    verdict = evaluate_action(
+        ActionRequest(
+            action_type=scenario.action,
+            target=scenario.target,
+            context=scenario.action_context,
+        )
     )
-    
-    await stream_status("Detection", "detected", f"Threat Confirmed: Risk Score {scenario['risk_score']}", "high")
+    logger.info(
+        "guardrail_verdict",
+        incident_id=incident_id,
+        action=verdict.action_type,
+        decision=verdict.decision.value,
+        risk_score=verdict.risk_score,
+    )
+    await manager.broadcast(
+        {
+            "type": "POLICY_VERDICT",
+            "incident_id": incident_id,
+            "timestamp": _now(),
+            **verdict.to_dict(),
+        }
+    )
 
-    # 4. Supervise
-    await stream_status("Supervisor", "evaluating", "Checking policy guardrails...", "low")
-    
-    risk_score = scenario['risk_score']
-    
-    if risk_score > 0.6: # Threshold for demo
-        # PAUSE FOR HUMAN APPROVAL
-        await stream_status("Supervisor", "blocked", f"High Risk Action Proposed: {scenario['action']}. Awaiting Authorization...", "critical")
-        
-        # Send explicit approval request to UI
-        await manager.broadcast({
-            "type": "APPROVAL_REQUIRED",
-            "action": scenario['action'],
-            "target": scenario['target'],
-            "risk_score": risk_score
-        })
-        
-        # Wait until frontend sends "APPROVE_ACTION" which sets the event
+    if verdict.decision is Decision.DENY:
+        await stream(
+            "Supervisor",
+            "denied",
+            f"Action {verdict.action_type} DENIED by policy "
+            f"(risk {verdict.risk_score:.2f}). Escalating to human operators.",
+            "critical",
+        )
+        logger.info("simulation_halted_by_policy", incident_id=incident_id)
+        return
+
+    if verdict.decision is Decision.REQUIRE_APPROVAL:
+        await stream(
+            "Supervisor",
+            "blocked",
+            f"{verdict.action_type} requires authorization "
+            f"(risk {verdict.risk_score:.2f}, {verdict.risk_level.value}). Awaiting operator...",
+            "critical",
+        )
+        await manager.broadcast(
+            {
+                "type": "APPROVAL_REQUIRED",
+                "incident_id": incident_id,
+                "action": verdict.action_type,
+                "target": scenario.target,
+                "risk_score": verdict.risk_score,
+                "reasons": list(verdict.reasons),
+            }
+        )
         await permission_event.wait()
-        
-        await stream_status("Supervisor", "authorized", "Action Authorized. Proceeding...", "low")
+        await stream("Supervisor", "authorized", "Action Authorized. Proceeding...")
+    else:
+        await stream(
+            "Supervisor",
+            "authorized",
+            f"{verdict.action_type} auto-approved (risk {verdict.risk_score:.2f}, below threshold).",
+        )
 
-    # 5. Forensics
-    await stream_status("Forensics", "investigating", "Reconstructing blast radius...", "medium")
-    
-    # Broadcast Scenario Graph
-    await manager.broadcast({
-        "type": "BLAST_RADIUS_UPDATE",
-        "graph": scenario['graph'],
-        "root_cause": scenario['name']
-    })
-
-    await stream_status("Forensics", "complete", "Root cause execution trace mapped.", "high")
-
-    # 6. Response
-    await stream_status("Response", "actuating", f"Executing {scenario['action']}...", "critical")
-    
-    # Simulate Slack Notification
-    timestamp = datetime.utcnow().strftime("%H:%M:%S")
-    await stream_status("Response", "notifying", f"Sending Slack Alert to #sec-ops at {timestamp}...", "medium")
-    await asyncio.sleep(0.5)
-
-    remediation = ASOCMessage(
-            message_type=MessageType.COMMAND,
-            source_agent="SupervisorAgent",
-            target_agent="ResponseAgent",
-            payload={"action": scenario['action'], "target": scenario['target']},
-            correlation_id=incident_id
+    # 4. Forensics
+    await stream("Forensics", "investigating", "Reconstructing blast radius...", "medium")
+    await manager.broadcast(
+        {
+            "type": "BLAST_RADIUS_UPDATE",
+            "incident_id": incident_id,
+            "graph": scenario.graph,
+            "root_cause": scenario.name,
+        }
     )
-    
-    await stream_status("Response", "success", "Threat Neutralized. Infrastructure Secure.", "low")
+    await stream("Forensics", "complete", "Root cause execution trace mapped.", "high")
 
-    # 7. Compliance
-    await stream_status("Compliance", "auditing", "Mapping to SOC2 & ISO 27001...", "low")
-    log = ASOCMessage(
-        message_type=MessageType.LOG,
-        source_agent="ResponseAgent",
-            payload={"event_type": "remediation", "details": {"action": scenario['action']}},
-            correlation_id=incident_id
-    )
-    # await compliance.process_message(log) # skip actual storage call for speed in multi-scenario
-    await stream_status("Compliance", "logged", f"Audit record #{random.randint(1000,9999)} sealed.", "low")
+    # 5. Response
+    await stream("Response", "actuating", f"Executing {verdict.action_type}...", "critical")
+    await stream("Response", "notifying", "Sending alert to #sec-ops...", "medium")
+    await stream("Response", "success", "Threat Neutralized. Infrastructure Secure.")
+
+    # 6. Compliance
+    await stream("Compliance", "auditing", "Mapping to SOC2 & ISO 27001 controls...")
+    if verdict.audit_required:
+        await stream("Compliance", "logged", f"Audit record sealed for incident {incident_id[:8]}.")
+    logger.info("simulation_complete", incident_id=incident_id)
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    uvicorn.run("api:app", host=settings.BIND_HOST, port=settings.PORT)
