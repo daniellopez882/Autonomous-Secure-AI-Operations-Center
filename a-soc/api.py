@@ -62,7 +62,10 @@ def _now() -> str:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Start the ambient telemetry feed, and stop it cleanly on shutdown."""
     global _background_task
-    setup_logging(level=settings.LOG_LEVEL, json_output=settings.JSON_LOGS)
+    # force=True: module-level get_logger() calls already configured logging
+    # with defaults at import time, and setup_logging is idempotent, so without
+    # this the JSON_LOGS and LOG_LEVEL settings were silently ignored.
+    setup_logging(level=settings.LOG_LEVEL, json_output=settings.JSON_LOGS, force=True)
     logger.info("service_starting", environment=settings.ENVIRONMENT)
     _background_task = asyncio.create_task(background_telemetry())
     try:

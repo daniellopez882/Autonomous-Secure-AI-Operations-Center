@@ -125,3 +125,31 @@ class TestNoHeavyImports:
         assert not [m for m in sys.modules if m.startswith("agents.")], (
             "importing api pulled in agent modules, which drag in boto3"
         )
+
+
+class TestLoggingConfiguration:
+    """
+    Module-level get_logger() calls configure logging at import time. Because
+    setup_logging is idempotent, the lifespan handler's call was a no-op and
+    JSON_LOGS / LOG_LEVEL from the environment were silently ignored -- the
+    container ran with JSON_LOGS=true and still emitted plain text.
+    """
+
+    def test_lifespan_applies_the_configured_format(self, monkeypatch):
+        import logging
+
+        from core.config.settings import settings
+        from core.logging_config import JsonFormatter
+
+        monkeypatch.setattr(settings, "JSON_LOGS", True)
+
+        from fastapi.testclient import TestClient
+
+        from api import app
+
+        with TestClient(app):
+            handlers = logging.getLogger().handlers
+            assert handlers, "root logger has no handler"
+            assert isinstance(handlers[0].formatter, JsonFormatter), (
+                "JSON_LOGS=true did not take effect; setup_logging was a no-op"
+            )

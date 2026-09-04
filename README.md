@@ -67,9 +67,9 @@ curl "localhost:8000/api/v1/policy/evaluate?action_type=IAM_REVOKE"
 ```
 
 ```json
-{"decision": "require_approval", "risk_score": 0.8, "risk_level": "high",
+{"decision": "require_approval", "risk_score": 0.8, "risk_level": "critical",
  "action_type": "IAM_REVOKE",
- "reasons": ["base risk for IAM_REVOKE scored 0.80 (high)",
+ "reasons": ["base risk for IAM_REVOKE scored 0.80 (critical)",
              "action is destructive and cannot be automatically undone",
              "score 0.80 >= 0.5"],
  "audit_required": true}
@@ -147,7 +147,7 @@ Environment-driven; see [`a-soc/.env.example`](a-soc/.env.example).
 cd a-soc && pytest
 ```
 
-87 tests: guardrail decision table, rego parity, WebSocket resilience, workflow
+88 tests: guardrail decision table, rego parity, WebSocket resilience, workflow
 routing, API contract. There were none before.
 
 ## Security
