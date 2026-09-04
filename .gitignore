@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local state
+*.db
+*.sqlite3
+a-soc/data/
+a-soc/events.jsonl
+
+# Node
+node_modules/
+.next/
+out/
