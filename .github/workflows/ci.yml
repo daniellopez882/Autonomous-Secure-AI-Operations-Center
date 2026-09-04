@@ -1,0 +1,153 @@
+name: CI
+
+# Replaces ci-cd.yml, whose backend test step carried
+#     continue-on-error: true
+# so a failing suite could never fail the build. With no tests in the tree,
+# pytest also exited 5 ("no tests collected"), which that flag hid as well.
+# The pipeline was reporting green on a repository whose orchestration module
+# could not be imported.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: a-soc
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  backend:
+    name: Backend lint and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: a-soc/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Ruff lint
+        run: ruff check . --output-format=github
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Tests
+        # No continue-on-error: a failing suite fails the build.
+        env:
+          ENVIRONMENT: testing
+          SIMULATION_STEP_SECONDS: "0"
+        run: pytest --cov=. --cov-report=term-missing
+
+      - name: Fail if no tests were collected
+        env:
+          ENVIRONMENT: testing
+        run: |
+          count=$(pytest --collect-only -q 2>/dev/null | tail -1)
+          echo "collected: $count"
+          if echo "$count" | grep -qE "^no tests ran|0 tests"; then
+            echo "::error::pytest collected no tests"
+            exit 1
+          fi
+
+  policy:
+    name: Rego policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OPA
+        run: |
+          curl -sSL -o /usr/local/bin/opa \
+            https://openpolicyagent.org/downloads/v0.68.0/opa_linux_amd64_static
+          chmod +x /usr/local/bin/opa
+          opa version
+
+      - name: Check the policy parses
+        run: opa parse guardrails/policies/action_policy.rego
+
+      - name: Vet the policy
+        run: opa check guardrails/policies/
+
+  frontend:
+    name: Dashboard build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: a-soc/dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: a-soc/dashboard/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint --if-present
+      - run: npm run build
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: [backend, policy]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: a-soc
+          push: false
+          load: true
+          tags: asoc-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Container serves the API
+        # Regression guard: the image used to run main.py, a one-shot CLI demo
+        # that printed and exited, so nothing ever listened on 8000.
+        run: |
+          docker run -d --name asoc-ci -p 8000:8000 \
+            -e ENVIRONMENT=development asoc-backend:ci
+          for i in $(seq 1 40); do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+              echo "healthy after ${i}s"
+              curl -fsS http://localhost:8000/health
+              curl -fsS "http://localhost:8000/api/v1/policy/evaluate?action_type=IAM_REVOKE"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::container never served /health"
+          docker logs asoc-ci
+          exit 1
+
+      - name: Image does not run as root
+        run: |
+          user=$(docker run --rm --entrypoint sh asoc-backend:ci -c 'id -un')
+          echo "runs as: $user"
+          [ "$user" != "root" ] || { echo "::error::image runs as root"; exit 1; }
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f asoc-ci || true
