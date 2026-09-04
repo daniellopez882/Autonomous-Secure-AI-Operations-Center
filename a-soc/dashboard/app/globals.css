@@ -1,39 +1,52 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/*
+ * Tailwind v4.
+ *
+ * This file was written against Tailwind v3 while package.json depends on
+ * v4 ("tailwindcss": "^4" with @tailwindcss/postcss). In v4 the three
+ * `@tailwind base/components/utilities` directives no longer register the
+ * utility layer, so every `@apply` below failed with
+ *
+ *   Cannot apply unknown utility class `bg-slate-900`
+ *
+ * and the dashboard could not build at all. v4 replaces those directives with
+ * a single import.
+ */
+@import "tailwindcss";
 
-@layer base {
-  :root {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --popover: 240 10% 3.9%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 180 100% 50%;
-    --primary-foreground: 240 5.9% 10%;
-    --secondary: 270 100% 60%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 180 100% 50%;
-  }
-
-  body {
-    background-color: #030712;
-    background-image: radial-gradient(circle at 50% 0%, rgba(6, 182, 212, 0.15), transparent 50%);
-    font-family: 'Inter', system-ui, sans-serif;
-    color: white;
-  }
+@theme {
+  --color-background: hsl(240 10% 3.9%);
+  --color-foreground: hsl(0 0% 98%);
+  --color-card: hsl(240 10% 3.9%);
+  --color-card-foreground: hsl(0 0% 98%);
+  --color-popover: hsl(240 10% 3.9%);
+  --color-popover-foreground: hsl(0 0% 98%);
+  --color-primary: hsl(180 100% 50%);
+  --color-primary-foreground: hsl(240 5.9% 10%);
+  --color-secondary: hsl(270 100% 60%);
+  --color-secondary-foreground: hsl(0 0% 98%);
+  --color-muted: hsl(240 3.7% 15.9%);
+  --color-muted-foreground: hsl(240 5% 64.9%);
+  --color-accent: hsl(240 3.7% 15.9%);
+  --color-accent-foreground: hsl(0 0% 98%);
+  --color-destructive: hsl(0 62.8% 30.6%);
+  --color-destructive-foreground: hsl(0 0% 98%);
+  --color-border: hsl(240 3.7% 15.9%);
+  --color-input: hsl(240 3.7% 15.9%);
+  --color-ring: hsl(180 100% 50%);
 }
 
-/* Perspective Grid Floor - Simplified */
+body {
+  background-color: #030712;
+  background-image: radial-gradient(
+    circle at 50% 0%,
+    rgba(6, 182, 212, 0.15),
+    transparent 50%
+  );
+  font-family: "Inter", system-ui, sans-serif;
+  color: white;
+}
+
+/* Perspective grid floor */
 .cyber-grid {
   position: absolute;
   bottom: 0;
@@ -58,7 +71,7 @@
   }
 
   .cyber-card::before {
-    content: '';
+    content: "";
     position: absolute;
     top: 0;
     left: 0;
@@ -82,18 +95,16 @@
   }
 }
 
-@layer utilities {
-  .text-glow {
-    text-shadow: 0 0 10px rgba(6, 182, 212, 0.7);
-  }
+@utility text-glow {
+  text-shadow: 0 0 10px rgba(6, 182, 212, 0.7);
+}
 
-  .animate-scan {
-    animation: scan 4s linear infinite;
-  }
+@utility animate-scan {
+  animation: scan 4s linear infinite;
+}
 
-  .animate-pulse-fast {
-    animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-  }
+@utility animate-pulse-fast {
+  animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
 @keyframes scan {
@@ -120,7 +131,7 @@
   border-radius: 3px;
 }
 
-/* CRT Scanline - Simplified */
+/* CRT scanline */
 .scanlines::before {
   content: " ";
   display: block;
