@@ -178,6 +178,15 @@ authenticating proxy before exposing it.
 4. Authentication on the HTTP API
 5. Load test the WebSocket fan-out and publish the numbers
 
+## Documentation
+
+| Document | What it records |
+|---|---|
+| [`a-soc/docs/status.md`](a-soc/docs/status.md) | What is implemented and tested, what is simulated, what is declared but not wired |
+| [ADR 0001](a-soc/docs/adr/0001-one-guardrail-authority.md) | One guardrail authority; deny before approval; the rego is pinned to it by parity tests and OPA in CI |
+| [ADR 0002](a-soc/docs/adr/0002-the-simulation-is-the-product.md) | The simulation is the product; `status.md` is the contract for what runs |
+| [Threat model](a-soc/docs/threat-model.md) | Eight threats with what was open, what is closed, and what remains; the boundaries; the failure modes that fail closed |
+
 ## Repository layout
 
 ```
@@ -191,6 +200,7 @@ a-soc/
     simulation/      scenario definitions
     config/          typed settings
   agents/            six agent classes (stubbed; see docs/status.md)
+  docs/              status.md, ADRs, threat model
   dashboard/         Next.js UI
   k8s/               manifests (not applied by anything here)
   tests/             unit and integration
