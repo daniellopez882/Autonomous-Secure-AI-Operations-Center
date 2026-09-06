@@ -1,8 +1,9 @@
 import abc
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from .message import ASOCMessage, MessageType
-import asyncio
+
 
 class BaseAgent(abc.ABC):
     def __init__(self, name: str, description: str):
@@ -13,15 +14,13 @@ class BaseAgent(abc.ABC):
 
     def _setup_logging(self):
         handler = logging.StreamHandler()
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
+        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
         self.logger.setLevel(logging.INFO)
 
     @abc.abstractmethod
-    async def process_message(self, message: ASOCMessage) -> Optional[ASOCMessage]:
+    async def process_message(self, message: ASOCMessage) -> ASOCMessage | None:
         """Process an incoming message and optionally return a response."""
         pass
 
@@ -31,18 +30,19 @@ class BaseAgent(abc.ABC):
         # In a real implementation, this would push to a message bus like Redis/RabbitMQ
         pass
 
-    async def log_event(self, event_type: str, details: Dict[str, Any]):
+    async def log_event(self, event_type: str, details: dict[str, Any]):
         """Log a security event to the immutable audit store (EventStore)."""
         log_msg = ASOCMessage(
             message_type=MessageType.LOG,
             source_agent=self.name,
-            payload={"event_type": event_type, "details": details}
+            payload={"event_type": event_type, "details": details},
         )
         self.logger.info(f"Audit Log: {event_type} - {details}")
-        
+
         # Persist to disk
         try:
             from core.memory.event_store import event_store
+
             await event_store.append_event(event_type, details, self.name)
         except ImportError:
             # Fallback for when running in diverse environments

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   Shield, Activity, AlertTriangle, CheckCircle, Clock, Zap, Play,
   Menu, Search, User, Bell, ChevronRight, Calculator, Terminal,
@@ -40,19 +40,36 @@ interface ApprovalRequest {
   risk_score: number;
 }
 
+// Shape emitted by the backend's BLAST_RADIUS_UPDATE message.
+interface GraphNode {
+  id: string;
+  type: "threat_actor" | "identity" | "resource";
+  label: string;
+  risk: "low" | "medium" | "high" | "critical";
+}
+
+interface GraphEdge {
+  source: string;
+  target: string;
+  label: string;
+}
+
 interface GraphData {
-  nodes: any[];
-  edges: any[];
+  nodes: GraphNode[];
+  edges: GraphEdge[];
 }
 
 export default function Dashboard() {
   const [logs, setLogs] = useState<AgentUpdate[]>([]);
   const [backgroundLogs, setBackgroundLogs] = useState<AgentUpdate[]>([]);
   const [running, setRunning] = useState(false);
-  const [ws, setWs] = useState<WebSocket | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
   const [blastRadius, setBlastRadius] = useState<GraphData | null>(null);
   const [activeTab, setActiveTab] = useState<'incidents' | 'telemetry'>('incidents');
+  // useId() is stable across the server and client render, so it cannot cause
+  // a hydration mismatch the way the previous Math.random() call did.
+  const sessionId = useId().replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8);
   const [currentTime, setCurrentTime] = useState<string>("");
 
   // Stats
@@ -67,8 +84,12 @@ export default function Dashboard() {
     // Clock
     const timer = setInterval(() => setCurrentTime(new Date().toLocaleTimeString()), 1000);
 
-    // Connect to Python backend via WebSocket on 9004
-    const socket = new WebSocket("ws://localhost:9004/ws/threat-feed");
+    // The backend URL comes from the environment. It was hardcoded to
+    // ws://localhost:9004 while the server listens on 8000 and docker-compose
+    // publishes 9002 -- three different ports, so the dashboard could never
+    // reach the backend. NEXT_PUBLIC_WS_URL is already set by compose.
+    const base = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000";
+    const socket = new WebSocket(`${base}/ws/threat-feed`);
 
     socket.onopen = () => {
       console.log("Connected to A-SOC Python Backend");
@@ -107,7 +128,7 @@ export default function Dashboard() {
       }
     };
 
-    setWs(socket);
+    wsRef.current = socket;
 
     return () => {
       socket.close();
@@ -116,6 +137,7 @@ export default function Dashboard() {
   }, []);
 
   const runSimulation = () => {
+    const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       setRunning(true);
       setLogs([]);
@@ -125,7 +147,8 @@ export default function Dashboard() {
   };
 
   const approveAction = () => {
-    if (ws) {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send("APPROVE_ACTION");
       setApprovalRequest(null);
     }
@@ -181,7 +204,7 @@ export default function Dashboard() {
                 </div>
               </div>
               <div className="text-[10px] text-slate-500 font-mono hidden lg:block">
-                SESSION ID: {Math.random().toString(36).substring(7).toUpperCase()}
+                SESSION ID: {sessionId}
               </div>
             </div>
           </div>

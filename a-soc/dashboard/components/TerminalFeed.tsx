@@ -1,3 +1,4 @@
+import type { LucideIcon } from "lucide-react";
 import { Shield, Server } from "lucide-react";
 import { useEffect, useRef } from "react";
 
@@ -13,7 +14,7 @@ interface TerminalFeedProps {
     logs: Log[];
     title: string;
     color?: "cyan" | "orange" | "red";
-    icon?: any;
+    icon?: LucideIcon;
 }
 
 export function TerminalFeed({ logs, title, color = "cyan", icon: Icon = Shield }: TerminalFeedProps) {
@@ -87,7 +88,7 @@ export function TerminalFeed({ logs, title, color = "cyan", icon: Icon = Shield 
 
             {/* Footer Status Bar */}
             <div className="bg-slate-950 px-4 py-1.5 border-t border-slate-800 text-[10px] font-mono text-slate-500 flex justify-between uppercase tracking-wider">
-                <span>Channel: Secure/WSS-9004</span>
+                <span>Channel: Secure/WSS</span>
                 <span className="flex items-center gap-2">
                     <span className={`w-1.5 h-1.5 rounded-full ${logs.length > 0 ? 'bg-green-500 animate-pulse' : 'bg-slate-600'}`}></span>
                     Live

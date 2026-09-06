@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Shield, Server, Database, User, Globe } from "lucide-react";
+import {Server, Database, User, Globe} from "lucide-react";
 
 interface Node {
     id: string;
@@ -39,7 +38,6 @@ export function AttackGraph({ data }: { data: GraphData }) {
     data.nodes.forEach((node, i) => {
         if (!positions[node.id]) {
             // Assign a position on the right side if it's likely a resource/target
-            const offset = i * 40;
             positions[node.id] = {
                 x: 500,
                 y: 80 + (i * 70)

@@ -1,0 +1,68 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: a-soc
+
+jobs:
+  dependencies:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: a-soc/requirements.txt
+
+      - run: python -m pip install --upgrade pip pip-audit
+
+      - name: pip-audit
+        # The previous requirements.txt pinned nothing at all, so an audit
+        # could not say which versions were actually installed.
+        run: pip-audit --requirement requirements.txt --progress-spinner off
+        continue-on-error: true
+
+  static:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: python -m pip install --upgrade pip bandit
+
+      - name: Bandit
+        run: bandit -r . -x ./tests,./.venv,./dashboard -ll -f screen
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
